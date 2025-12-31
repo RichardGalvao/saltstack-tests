@@ -22,4 +22,7 @@ scrape_configs:
         replacement: test_value 
       - target_label: another_test_label
         replacement: another_test_value
+      - target_label: yet_another_test_label
+        replacement: yet_another_test_value
+     
       
