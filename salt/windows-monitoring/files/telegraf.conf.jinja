@@ -1,0 +1,220 @@
+{#- Telegraf Configuration for Windows Monitoring -#}
+{%- set install_dir = salt['pillar.get']('monitoring:install_dir', 'C:\\Monitoring') -%}
+{%- set vmetrics = salt['pillar.get']('monitoring:vmetrics', {}) -%}
+{%- set global_user = vmetrics.get('user', '') -%}
+{%- set global_password = vmetrics.get('password', '') -%}
+{%- set clusters = vmetrics.get('clusters', []) -%}
+{%- set prefix_url = vmetrics.get('prefix_url', '/insert/0/prometheus/api/v1/write') -%}
+{%- set agent = salt['pillar.get']('monitoring:agent', {}) -%}
+{%- set customer = salt['pillar.get']('monitoring:customer', 'default') -%}
+{%- set systemframe_id = salt['pillar.get']('monitoring:systemframe_id', grains['id']) -%}
+{%- set deploy_version = salt['pillar.get']('monitoring:deploy_version', 'missing') -%}
+{%- set instance = grains['id'] -%}
+{%- set ip_addr = grains.get('ipv4', ['127.0.0.1'])[0] -%}
+{%- set telegraf_collectors = salt['pillar.get']('monitoring:telegraf_collectors', []) -%}
+{%- set monitor_services = salt['pillar.get']('monitoring:monitor_services', []) -%}
+{%- set log_level = salt['pillar.get']('monitoring:log_level', 'info') -%}
+# Telegraf Configuration
+#
+# Managed by SaltStack - Do not edit manually
+
+# Global tags applied to all metrics
+[global_tags]
+  systemframe_id = "{{ systemframe_id }}"
+  instance = "{{ instance }}"
+  display_name = "{{ instance }}"
+  ip_addr = "{{ ip_addr }}"
+  collector_name = "telegraf"
+  customer = "{{ customer }}"
+  deploy_version = "{{ deploy_version }}"
+
+# Agent configuration
+[agent]
+  interval = "{{ agent.get('interval', '30s') }}"
+  round_interval = true
+  metric_batch_size = {{ agent.get('batch_size', 1000) }}
+  metric_buffer_limit = {{ agent.get('buffer_limit', 10000) }}
+  collection_jitter = "0s"
+  flush_interval = "10s"
+  flush_jitter = "0s"
+  precision = "0s"
+{%- if log_level == 'debug' %}
+  debug = true
+{%- else %}
+  quiet = true
+{%- endif %}
+  logformat = "text"
+  logfile = "{{ install_dir }}\\Telegraf\\telegraf.log"
+
+###############################################################################
+#                            INPUT PLUGINS                                    #
+###############################################################################
+
+# Windows Performance Counters
+[[inputs.win_perf_counters]]
+  [[inputs.win_perf_counters.object]]
+    ObjectName = "Processor"
+    Instances = ["*"]
+    Counters = ["% Processor Time"]
+    Measurement = "win_cpu"
+    IncludeTotal = true
+
+  [[inputs.win_perf_counters.object]]
+    ObjectName = "Network Interface"
+    Counters = ["Bytes Received/sec", "Bytes Sent/sec", "Packets Received/sec", "Packets Sent/sec"]
+    Instances = ["*"]
+    Measurement = "win_net"
+    IncludeTotal = true
+
+  [[inputs.win_perf_counters.object]]
+    ObjectName = "Memory"
+    Instances = ["*"]
+    Counters = [
+      "Available Bytes",
+      "Committed Bytes",
+      "Cache Faults/sec"
+    ]
+    Measurement = "win_mem"
+    IncludeTotal = true
+
+{%- if 'process' in telegraf_collectors %}
+  [[inputs.win_perf_counters.object]]
+    ObjectName = "Process"
+    Instances = ["*"]
+    Counters = [
+      "ID Process",
+      "% Processor Time",
+      "Working Set",
+      "Thread Count"
+    ]
+    Measurement = "win_process"
+    IncludeTotal = true
+{%- endif %}
+
+  [[inputs.win_perf_counters.object]]
+    ObjectName = "PhysicalDisk"
+    Instances = ["*"]
+    Counters = [
+      "Disk Read Bytes/sec",
+      "Disk Write Bytes/sec",
+      "% Disk Time"
+    ]
+    Measurement = "win_disk_physical"
+    IncludeTotal = true
+
+  [[inputs.win_perf_counters.object]]
+    ObjectName = "LogicalDisk"
+    Instances = ["*"]
+    Counters = [
+      "% Idle Time",
+      "% Disk Time",
+      "% Disk Read Time",
+      "% Disk Write Time",
+      "% User Time",
+      "% Free Space",
+      "Current Disk Queue Length",
+      "Free Megabytes"
+    ]
+    Measurement = "win_disk_logical"
+    IncludeTotal = true
+
+  [[inputs.win_perf_counters.object]]
+    ObjectName = "System"
+    Counters = ["System Up Time"]
+    Instances = ["------"]
+    Measurement = "win_availability"
+
+  [[inputs.win_perf_counters.object]]
+    ObjectName = "Terminal Services"
+    Counters = [
+      "Active Sessions",
+      "Inactive Sessions"
+    ]
+    Instances = ["------"]
+    Measurement = "win_terminal_services"
+
+# Memory input plugin
+[[inputs.mem]]
+
+# Telegraf internal metrics
+[[inputs.internal]]
+  interval = "10s"
+  collect_memstats = false
+  name_override = "telegraf_internal"
+
+# Custom thresholds file
+[[inputs.file]]
+  files = ["{{ install_dir }}\\Telegraf\\custom_thresholds.txt"]
+
+{%- if 'service' in telegraf_collectors and monitor_services %}
+# Windows Services monitoring
+[[inputs.win_services]]
+  service_names = [
+{%- for service in monitor_services %}
+    "{{ service }}",
+{%- endfor %}
+  ]
+  name_override = "win_services"
+{%- endif %}
+
+# System boot time
+[[inputs.exec]]
+  commands = [
+    "cmd /C powershell -Command \"$b = [long]((Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds; Write-Output \\\"system_boot_time value=$b\\\"\""
+  ]
+  name_override = "win_system_Boot_Time"
+  data_format = "influx"
+  interval = "60s"
+  timeout = "50s"
+
+# Shutdown event log
+[[inputs.exec]]
+  commands = [
+    "cmd /C powershell -NoProfile -ExecutionPolicy Bypass -File {{ install_dir | replace('\\', '/') }}/Telegraf/Scripts/shutdown_event_log.ps1"
+  ]
+  name_override = "win_system_Shutdown_Time"
+  data_format = "influx"
+  interval = "60s"
+  timeout = "600s"
+
+# User sessions
+[[inputs.exec]]
+  commands = [
+    "cmd /C powershell -NoProfile -ExecutionPolicy Bypass -File {{ install_dir | replace('\\', '/') }}/Telegraf/Scripts/get_sessions.ps1"
+  ]
+  name_override = "win_system_Users_Sessions"
+  data_format = "influx"
+  interval = "60s"
+  timeout = "600s"
+
+# User sessions CPU
+[[inputs.exec]]
+  commands = [
+    "cmd /C powershell -NoProfile -ExecutionPolicy Bypass -File {{ install_dir | replace('\\', '/') }}/Telegraf/Scripts/get_sessions_cpu.ps1"
+  ]
+  name_override = "win_system_Users_Sessions_CPU"
+  data_format = "influx"
+  interval = "60s"
+  timeout = "600s"
+
+###############################################################################
+#                            OUTPUT PLUGINS                                   #
+###############################################################################
+
+# Output to VictoriaMetrics clusters via HTTP remote write
+{%- for cluster in clusters %}
+{%- set cluster_user = cluster.get('user', global_user) %}
+{%- set cluster_password = cluster.get('password', global_password) %}
+{%- set cluster_port = cluster.get('port', 30480) %}
+
+[[outputs.http]]
+  url = "http://{{ cluster.host }}:{{ cluster_port }}{{ prefix_url }}"
+  method = "POST"
+  data_format = "prometheusremotewrite"
+  username = "{{ cluster_user }}"
+  password = "{{ cluster_password }}"
+  [outputs.http.headers]
+    Content-Type = "application/x-protobuf"
+    Content-Encoding = "snappy"
+    X-Prometheus-Remote-Write-Version = "0.1.0"
+{%- endfor %}

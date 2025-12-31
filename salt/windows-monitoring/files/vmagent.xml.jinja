@@ -1,0 +1,25 @@
+{#- WinSW Service Definition for VMAgent -#}
+{%- set install_dir = salt['pillar.get']('monitoring:install_dir', 'C:\\Monitoring') -%}
+{%- set version = salt['pillar.get']('monitoring:versions:vmagent', '1.102.3') -%}
+{%- set vmetrics = salt['pillar.get']('monitoring:vmetrics', {}) -%}
+{%- set global_user = vmetrics.get('user', '') -%}
+{%- set global_password = vmetrics.get('password', '') -%}
+{%- set clusters = vmetrics.get('clusters', []) -%}
+{#- Build remote write URLs with collapse merge logic -#}
+{%- set remote_write_urls = [] -%}
+{%- for cluster in clusters -%}
+  {%- set cluster_user = cluster.get('user', global_user) -%}
+  {%- set cluster_password = cluster.get('password', global_password) -%}
+  {%- set cluster_port = cluster.get('port', 30480) -%}
+  {%- set url = 'http://' ~ cluster_user ~ ':' ~ cluster_password ~ '@' ~ cluster.host ~ ':' ~ cluster_port ~ '/insert/0/prometheus/api/v1/write' -%}
+  {%- do remote_write_urls.append(url) -%}
+{%- endfor -%}
+<service>
+  <id>vmagent</id>
+  <name>VictoriaMetrics Agent</name>
+  <description>VictoriaMetrics Agent for Windows monitoring</description>
+  <executable>{{ install_dir }}\VictoriaMetrics\vmagent-prod.exe</executable>
+  <arguments>-promscrape.config="{{ install_dir }}\VictoriaMetrics\Config\vmagent.yml" -remoteWrite.url="{{ remote_write_urls | join(',') }}"</arguments>
+  <logpath>{{ install_dir }}\VictoriaMetrics\logs</logpath>
+  <onfailure action="restart" delay="5 sec"/>
+</service>

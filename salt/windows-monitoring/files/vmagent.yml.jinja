@@ -1,0 +1,47 @@
+{#- VMAgent Prometheus Scrape Configuration -#}
+{%- set vmetrics = salt['pillar.get']('monitoring:vmetrics', {}) -%}
+{%- set scrape_interval = salt['pillar.get']('monitoring:scrape_interval', '15s') -%}
+{%- set scrape_timeout = salt['pillar.get']('monitoring:scrape_timeout', '15s') -%}
+{%- set customer = salt['pillar.get']('monitoring:customer', 'default') -%}
+{%- set systemframe_id = salt['pillar.get']('monitoring:systemframe_id', grains['id']) -%}
+{%- set instance = grains['id'] -%}
+{%- set ip_addr = grains.get('ipv4', ['127.0.0.1'])[0] -%}
+
+global:
+  scrape_interval: '{{ scrape_interval }}'
+  scrape_timeout: '{{ scrape_timeout }}'
+
+scrape_configs:
+  - job_name: 'windows_exporter'
+    static_configs:
+      - targets:
+        - 'localhost:9182'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: '{{ instance }}'
+      - target_label: customer
+        replacement: '{{ customer }}'
+      - target_label: systemframe_id
+        replacement: '{{ systemframe_id }}'
+      - target_label: ip_addr
+        replacement: '{{ ip_addr }}'
+
+  - job_name: 'vmagent_internal'
+    static_configs:
+      - targets:
+          - 'localhost:8429'
+    metric_relabel_configs:
+      - source_labels: ['__name__']
+        regex: 'vm_promscrape.*|vmagent_.*'
+        action: keep
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: '{{ instance }}'
+      - target_label: customer
+        replacement: '{{ customer }}'
+      - target_label: systemframe_id
+        replacement: '{{ systemframe_id }}'
+      - target_label: ip_addr
+        replacement: '{{ ip_addr }}'

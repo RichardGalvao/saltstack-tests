@@ -1,0 +1,44 @@
+<#
+.SYNOPSIS
+    Emit last shutdown/restart event in InfluxDB line-protocol.
+
+.DESCRIPTION
+    - Queries Windows System event log for shutdown events
+    - Monitors event IDs: 1074, 1076, 6006, 6008, 41, 109, 13, 20
+    - Extracts reason, shutdown type, initiating user
+    - Outputs InfluxDB line protocol with shutdown timestamp
+
+    Managed by SaltStack - Do not edit manually
+#>
+
+# 1) Define all shutdown/restart event IDs
+$shutdownEventIDs = @(1074, 1076, 6006, 6008, 41, 109, 13, 20)
+
+# 2) Get the latest shutdown/restart event
+$evt = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ID = $shutdownEventIDs } -MaxEvents 1 -ErrorAction SilentlyContinue
+if (-not $evt) { exit 0 }
+
+# 3) Compute Unix timestamp
+$t = [long]($evt.TimeCreated.ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds
+
+# 4) Raw parameters & record ID
+#    Only 1074/1076 actually have Properties[2], [4], [6]; others will be blank.
+$r3   = if ($evt.Properties.Count -gt 2) { $evt.Properties[2].Value } else { 'missing' }  # reason text
+$r5   = if ($evt.Properties.Count -gt 4) { $evt.Properties[4].Value } else { 'missing' }  # shutdown type
+$r7   = if ($evt.Properties.Count -gt 6) { $evt.Properties[6].Value } else { 'missing' }  # initiating user
+$rid  = $evt.RecordId
+$msgRaw = $evt.Message
+if (-not $msgRaw) { $msgRaw = 'missing' }
+
+# 5) Sanitize tags
+function SanitizeTag($v) { return ($v -replace '[^A-Za-z0-9_.-]','_') }
+$reason        = SanitizeTag $r3
+$shutdown_type = SanitizeTag $r5
+$initiated_by  = SanitizeTag $r7
+$msgTag = SanitizeTag $msgRaw
+
+# 6) Build InfluxDB line-protocol
+#    message is now a tag (unquoted), so we escaped any bad chars above
+$line = "shutdown_time,reason=$reason,shutdown_type=$shutdown_type,initiated_by=$initiated_by,record_id=$rid,shutdown_message=$msgTag value=$t"
+
+Write-Output $line

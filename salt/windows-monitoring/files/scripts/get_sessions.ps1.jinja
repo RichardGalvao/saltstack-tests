@@ -1,0 +1,94 @@
+<#
+.SYNOPSIS
+    Emit all user sessions in InfluxDB line-protocol using only quser.
+
+.DESCRIPTION
+    - Uses quser to get SessionName, User, State, IdleTime & LogonTime
+    - Sums memory & counts ALL TCP connections per session
+    - Maps STATE to numeric value
+    - Emits tags: user, session_id, session_name
+    - Emits fields: idle_seconds, logon_time, mem_mb, net_conn_count, value
+
+    Managed by SaltStack - Do not edit manually
+#>
+
+param(
+    [string]$Server = $env:COMPUTERNAME
+)
+
+function SanitizeTag($v) {
+    if (-not $v) { return 'missing' }
+    return ($v -replace '[^A-Za-z0-9_.-]','_')
+}
+
+function Parse-IdleSeconds($s) {
+    if (-not $s -or $s -in @('none','.') ) { return 0 }
+    if ($s -match '^(?<d>\d+)\+(?<h>\d+):(?<m>\d+)$') {
+        return ([int]$matches.d * 86400) + ([int]$matches.h * 3600) + ([int]$matches.m * 60)
+    }
+    if ($s -match '^(?<h>\d+):(?<m>\d+):(?<sec>\d+)$') {
+        return ([int]$matches.h * 3600) + ([int]$matches.m * 60) + [int]$matches.sec
+    }
+    if ($s -match '^(?<h>\d+):(?<m>\d+)$') {
+        return ([int]$matches.h * 3600) + ([int]$matches.m * 60)
+    }
+    if ($s -match '^(?<m>\d+)$') {
+        return [int]$matches.m * 60
+    }
+    return 0
+}
+
+# 1) Collect everything via quser
+$quserMap = @{}
+quser /server:$Server 2>&1 | ForEach-Object {
+    if ($_ -match 'USERNAME\s+SESSIONNAME' -or $_.Trim() -eq '') { return }
+    $ln = $_.TrimStart('>').Trim()
+
+    # Allow blank SessionName (\S*)
+    if ($ln -match '^(?<User>\S*)\s+(?<Sess>\S*)\s+(?<ID>\d+)\s+(?<State>\S+)\s+(?<Idle>\S*)\s+(?<Logon>.+)$') {
+        $quserMap[[int]$matches.ID] = [pscustomobject]@{
+            User     = if ($matches.User)     { $matches.User }   else { 'missing' }
+            Sess     = if ($matches.Sess)     { $matches.Sess }   else { 'missing' }
+            State    = if ($matches.State)    { $matches.State }  else { 'missing' }
+            IdleStr  = if ($matches.Idle)     { $matches.Idle }   else { 'missing' }
+            LogonStr = if ($matches.Logon)    { $matches.Logon }  else { 'missing' }
+        }
+    }
+}
+
+# 2) For each session, gather resources & emit
+foreach ($id in $quserMap.Keys) {
+    $q = $quserMap[$id]
+
+    # Memory & all TCP connections
+    $procs    = Get-Process | Where-Object { $_.SessionId -eq $id }
+    $memMB    = [math]::Round((($procs | Measure-Object WorkingSet64 -Sum).Sum) / 1MB, 2)
+    $pids     = $procs.Id
+    $conns    = if ($pids) {
+                   Get-NetTCPConnection -ErrorAction SilentlyContinue |
+                     Where-Object { $pids -contains $_.OwningProcess }
+               } else { @() }
+    $netCount = $conns.Count
+
+    # Compute epochs & idle
+    $logonEpoch = 0
+    try {
+        $dt = [datetime]::Parse($q.LogonStr)
+        $logonEpoch = [long](( $dt.ToUniversalTime() - [datetime]'1970-01-01' ).TotalSeconds)
+    } catch {}
+    $idleSec = Parse-IdleSeconds $q.IdleStr
+
+    # Map state to value
+    $value = switch ($q.State) {
+        'Disc'   { 0 }
+        'Active' { 1 }
+        'Conn'   { 2 }
+        'Listen' { 3 }
+        default  { 4 }
+    }
+
+    $tags   = "user=$(SanitizeTag $q.User)"
+    $fields = "idle_seconds=$idleSec,logon_time=$logonEpoch,mem_mb=$memMB,net_conn_count=$netCount,status=$value"
+    $line = "user_sessions,$tags $fields"
+    Write-Output ($line.Trim())
+}

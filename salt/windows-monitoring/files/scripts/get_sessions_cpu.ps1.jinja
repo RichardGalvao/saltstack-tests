@@ -1,0 +1,72 @@
+<#
+.SYNOPSIS
+    Emit per-session CPU usage in InfluxDB line-protocol.
+
+.DESCRIPTION
+    - Maps SessionId to User via quser
+    - Captures CPU time snapshots for comparison
+    - Calculates delta CPU per session between samples
+    - Normalizes to percentage based on logical processor count
+    - Outputs InfluxDB line protocol with tags (user, session_id)
+
+    Managed by SaltStack - Do not edit manually
+#>
+
+param(
+    [int]$IntervalSeconds = 1,
+    [string]$Server = $env:COMPUTERNAME
+)
+
+# 1) Map SessionId to User via quser
+$quserMap = @{}
+quser /server:$Server 2>&1 | ForEach-Object {
+    if ($_ -match 'USERNAME\s+SESSIONNAME' -or $_.Trim() -eq '') { return }
+    $ln = $_.TrimStart('>').Trim()
+    if ($ln -match '^(?<User>\S*)\s+\S*\s+(?<ID>\d+)\s+') {
+        $quserMap[[int]$matches.ID] = $matches.User
+    }
+}
+
+# 2) Number of cores for normalization
+$cores = (Get-WmiObject Win32_ComputerSystem -ComputerName $Server).NumberOfLogicalProcessors
+
+# 3) Function to collect CPU stats (TotalProcessorTime in seconds) per PID and SessionId
+function Get-ProcCpuSnapshot {
+    Get-Process -ComputerName $Server -ErrorAction SilentlyContinue |
+      Select-Object Id, SessionId, @{n='CpuTime';e={$_.CPU}}
+}
+
+# 4) Sample 1
+$snap1 = Get-ProcCpuSnapshot
+
+# 5) Wait interval
+Start-Sleep -Seconds $IntervalSeconds
+
+# 6) Sample 2
+$snap2 = Get-ProcCpuSnapshot
+
+# 7) Join, calculate delta and group by session
+$perSession = @{}
+foreach ($p2 in $snap2) {
+    $p1 = $snap1 | Where-Object Id -eq $p2.Id
+    if ($p1) {
+        $deltaSec = $p2.CpuTime - $p1.CpuTime
+        if ($deltaSec -gt 0) {
+            $sid = $p2.SessionId
+            if (-not $perSession.ContainsKey($sid)) {
+                $perSession[$sid] = 0
+            }
+            # CPU% per process = (deltaSec / interval) / cores * 100
+            $perSession[$sid] += ($deltaSec / $IntervalSeconds / $cores) * 100
+        }
+    }
+}
+
+# 8) Emit InfluxDB line-protocol output
+foreach ($sid in $perSession.Keys) {
+    $user = if ($quserMap.ContainsKey($sid)) { $quserMap[$sid] } else { 'missing' }
+    $userTag = ($user -replace '[^A-Za-z0-9_.-]','_')
+    $cpuPct = [math]::Round($perSession[$sid],2)
+    $line = "user_sessions_cpu,user=$userTag,session_id=$sid cpu_percent=$cpuPct"
+    Write-Output $line
+}

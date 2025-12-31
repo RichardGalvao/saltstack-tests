@@ -1,0 +1,6 @@
+{#- Custom thresholds for alerting -#}
+{%- set thresholds = salt['pillar.get']('monitoring:thresholds', {}) -%}
+# Custom thresholds - Managed by SaltStack
+# Format: threshold_name value=X
+
+custom_thresholds cpu_threshold={{ thresholds.get('cpu', 90) }}i,mem_threshold={{ thresholds.get('mem', 90) }}i,disk_threshold={{ thresholds.get('disk', 90) }}i
